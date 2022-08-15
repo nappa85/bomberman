@@ -1,0 +1,435 @@
+//! A simplified implementation of the classic game "Bomberman".
+
+use bevy::{
+    prelude::*,
+    sprite::collide_aabb::{collide, Collision},
+};
+
+// x coordinates
+const RIGHT_WALL: f32 = BRICK_SIZE.x * (COLS as f32) / 2.;
+const LEFT_WALL: f32 = -RIGHT_WALL;
+// y coordinates
+const TOP_WALL: f32 = BRICK_SIZE.y * (ROWS as f32) / 2.;
+const BOTTOM_WALL: f32 = -TOP_WALL;
+
+const BRICK_SIZE: Vec2 = Vec2::new(50., 50.);
+const BOMB_SIZE: Vec2 = Vec2::new(40., 40.);
+
+const MOVE_SPEED_X: f32 = BRICK_SIZE.x / 10.;
+const MOVE_SPEED_Y: f32 = BRICK_SIZE.y / 10.;
+
+const SCOREBOARD_FONT_SIZE: f32 = 40.0;
+const SCOREBOARD_TEXT_PADDING: Val = Val::Px(5.0);
+
+const BACKGROUND_COLOR: Color = Color::rgb(0.9, 0.9, 0.9);
+const PLAYER_COLOR: Color = Color::rgb(0.3, 0.3, 0.7);
+const BRICK_COLOR: Color = Color::rgb(0.5, 0.5, 1.0);
+const WALL_COLOR: Color = Color::rgb(0.8, 0.8, 0.8);
+const TEXT_COLOR: Color = Color::rgb(0.5, 0.5, 1.0);
+const SCORE_COLOR: Color = Color::rgb(1.0, 0.5, 0.5);
+const BOMB_COLOR: Color = Color::rgb(0.0, 0.0, 0.0);
+const FIRE_COLOR: Color = Color::rgb(1.0, 0.0, 0.0);
+
+// standard bomberman stage
+const ROWS: usize = 11;
+const COLS: usize = 13;
+
+fn main() {
+    App::new()
+        .add_plugins(DefaultPlugins)
+        .insert_resource(Scoreboard { score: 0 })
+        .insert_resource(ClearColor(BACKGROUND_COLOR))
+        .add_startup_system(setup)
+        .add_event::<ExplosionEvent>()
+        .add_event::<Explosion2Event>()
+        .add_system_set(
+            SystemSet::new()
+                .with_system(check_for_explosions)
+                .with_system(move_player.before(check_for_explosions))
+                .with_system(place_bomb.before(check_for_explosions))
+                .with_system(explode.after(check_for_explosions))
+                .with_system(explode2.after(explode))
+                .with_system(fire.after(explode))
+        )
+        .add_system(update_scoreboard)
+        .add_system(bevy::window::close_on_esc)
+        .run();
+}
+
+#[derive(Component)]
+struct Player {
+    max_bombs: u8,
+    active_bombs: u8,
+    bomb_power: u8,
+}
+
+impl Default for Player {
+    fn default() -> Self {
+        Player {
+            max_bombs: 1,
+            active_bombs: 0,
+            bomb_power: 1,
+        }
+    }
+}
+
+#[derive(Component, Deref, DerefMut)]
+struct Velocity(Vec2);
+
+#[derive(Component)]
+struct Breakable;
+
+struct ExplosionEvent(Entity);
+
+struct Explosion2Event(Entity);
+
+#[derive(Component)]
+struct Brick;
+
+#[derive(Component)]
+struct Bomb {
+    player: Entity,
+    timer: Timer,
+    power: u8,
+}
+
+#[derive(Component)]
+struct Fire(Timer);
+
+// This resource tracks the game's score
+#[derive(Default)]
+struct Scoreboard {
+    score: usize,
+}
+
+// Add the game's entities to our world
+fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
+    // Camera
+    commands.spawn_bundle(Camera2dBundle::default());
+
+    commands
+        .spawn()
+        .insert(Player::default())
+        .insert_bundle(SpriteBundle {
+            transform: Transform {
+                // TODO: define starting point
+                translation: Vec3::new(LEFT_WALL + BRICK_SIZE.x / 2., TOP_WALL - BRICK_SIZE.y / 2., 0.0),
+                scale: BRICK_SIZE.extend(0.0),
+                ..default()
+            },
+            sprite: Sprite {
+                color: PLAYER_COLOR,
+                ..default()
+            },
+            ..default()
+        });
+
+    // Scoreboard
+    commands.spawn_bundle(
+        TextBundle::from_sections([
+            TextSection::new(
+                "Score: ",
+                TextStyle {
+                    font: asset_server.load("fonts/FiraSans-Bold.ttf"),
+                    font_size: SCOREBOARD_FONT_SIZE,
+                    color: TEXT_COLOR,
+                },
+            ),
+            TextSection::from_style(TextStyle {
+                font: asset_server.load("fonts/FiraMono-Medium.ttf"),
+                font_size: SCOREBOARD_FONT_SIZE,
+                color: SCORE_COLOR,
+            }),
+        ])
+        .with_style(Style {
+            position_type: PositionType::Absolute,
+            position: UiRect {
+                top: SCOREBOARD_TEXT_PADDING,
+                left: SCOREBOARD_TEXT_PADDING,
+                ..default()
+            },
+            ..default()
+        }),
+    );
+
+    // In Bevy, the `translation` of an entity describes the center point,
+    // not its bottom-left corner
+    let offset_x = LEFT_WALL + BRICK_SIZE.x / 2.;
+    let offset_y = BOTTOM_WALL + BRICK_SIZE.y / 2.;
+    for row in 0..ROWS {
+        for col in 0..COLS {
+            let brick_position = Vec2::new(
+                offset_x + (col as f32) * BRICK_SIZE.x,
+                offset_y + (row as f32) * BRICK_SIZE.y,
+            );
+
+            // TODO: manage different dispositions
+            if row % 2 == 1 && col % 2 == 1 {
+                // brick
+                commands
+                    .spawn()
+                    .insert(Brick)
+                    .insert_bundle(SpriteBundle {
+                        sprite: Sprite {
+                            color: BRICK_COLOR,
+                            ..default()
+                        },
+                        transform: Transform {
+                            translation: brick_position.extend(0.0),
+                            scale: Vec3::new(BRICK_SIZE.x, BRICK_SIZE.y, 1.0),
+                            ..default()
+                        },
+                        ..default()
+                    });
+            }
+            // TODO: randomly dispose walls
+            else if (2..(ROWS - 2)).contains(&row) || (2..(COLS - 2)).contains(&col) {
+                // wall
+                commands
+                    .spawn()
+                    .insert(Brick)
+                    .insert_bundle(SpriteBundle {
+                        sprite: Sprite {
+                            color: WALL_COLOR,
+                            ..default()
+                        },
+                        transform: Transform {
+                            translation: brick_position.extend(0.0),
+                            scale: Vec3::new(BRICK_SIZE.x, BRICK_SIZE.y, 1.0),
+                            ..default()
+                        },
+                        ..default()
+                    })
+                    .insert(Breakable);
+            }
+        }
+    }
+}
+
+fn move_player(
+    keyboard_input: Res<Input<KeyCode>>,
+    collision_query: Query<&Transform, (With<Brick>, Without<Player>)>,
+    mut query: Query<&mut Transform, With<Player>>,
+) {
+    if let Ok(mut player_transform) = query.get_single_mut() {
+        let mut new_translation = player_transform.translation.clone();
+        for key in keyboard_input.get_pressed() {
+            match key {
+                KeyCode::Up => {
+                    new_translation.y = (TOP_WALL - BRICK_SIZE.y / 2.).min(player_transform.translation.y + MOVE_SPEED_Y);
+                },
+                KeyCode::Down => {
+                    new_translation.y = (BOTTOM_WALL + BRICK_SIZE.y / 2.).max(player_transform.translation.y - MOVE_SPEED_Y);
+                },
+                KeyCode::Right => {
+                    new_translation.x = (RIGHT_WALL - BRICK_SIZE.x / 2.).min(player_transform.translation.x + MOVE_SPEED_X);
+                },
+                KeyCode::Left => {
+                    new_translation.x = (LEFT_WALL + BRICK_SIZE.x / 2.).max(player_transform.translation.x - MOVE_SPEED_X);
+                },
+                _ => {},
+            }
+        }
+
+        let player_size = player_transform.scale.truncate();
+        let (mut collide_up, mut collide_down, mut collide_right, mut collide_left) = (false, false, false, false);
+        for brick_transform in &collision_query {
+            if let Some(collision) = collide(new_translation, player_size, brick_transform.translation, brick_transform.scale.truncate()) {
+                match collision {
+                    Collision::Top => collide_down = true,
+                    Collision::Bottom => collide_up = true,
+                    Collision::Left => collide_right = true,
+                    Collision::Right => collide_left = true,
+                    _ => {},
+                }
+            }
+        }
+
+        if !collide_up && !collide_down {
+            player_transform.translation.y = new_translation.y;
+        }
+        if !collide_left && !collide_right {
+            player_transform.translation.x = new_translation.x;
+        }
+    }
+}
+
+fn place_bomb(
+    mut commands: Commands,
+    keyboard_input: Res<Input<KeyCode>>,
+    mut query: Query<(Entity, &mut Player, &Transform), With<Player>>,
+) {
+    if !keyboard_input.just_pressed(KeyCode::Space) {
+        return;
+    }
+
+    let (player_entity, mut player, player_transform) = query.single_mut();
+    if player.active_bombs >= player.max_bombs {
+        return;
+    }
+
+    let mut bomb_translation = player_transform.translation.clone();
+    bomb_translation.x = BRICK_SIZE.x * (bomb_translation.x / BRICK_SIZE.x).round();
+    bomb_translation.y = BRICK_SIZE.y * (bomb_translation.y / BRICK_SIZE.y).round();
+
+    commands
+        .spawn()
+        .insert(Bomb {
+            player: player_entity,
+            timer: Timer::from_seconds(1., false),
+            power: player.bomb_power,
+        })
+        .insert_bundle(SpriteBundle {
+            sprite: Sprite {
+                color: BOMB_COLOR,
+                ..default()
+            },
+            transform: Transform {
+                translation: bomb_translation,
+                scale: Vec3::new(BOMB_SIZE.x, BOMB_SIZE.y, 1.0),
+                ..default()
+            },
+            ..default()
+        });
+
+    player.active_bombs += 1;
+}
+
+fn check_for_explosions(
+    mut query: Query<(Entity, &mut Bomb), (Without<Brick>, Without<Player>, With<Bomb>)>,
+    time: Res<Time>,
+    mut explosion_events: EventWriter<ExplosionEvent>,
+) {
+    for (bomb_entity, mut bomb) in &mut query {
+        bomb.timer.tick(time.delta());
+        if bomb.timer.finished() {
+            explosion_events.send(ExplosionEvent(bomb_entity));
+        }
+    }
+}
+
+fn explode(
+    mut commands: Commands,
+    mut scoreboard: ResMut<Scoreboard>,
+    bomb_collision_query: Query<(Entity, &Bomb, &Transform), (Without<Brick>, Without<Player>, With<Bomb>)>,
+    brick_collision_query: Query<(Entity, &Transform), (With<Brick>, With<Breakable>, Without<Player>, Without<Bomb>)>,
+    mut player_collision_query: Query<(Entity, &Transform, &mut Player), (Without<Brick>, With<Player>, Without<Bomb>)>,
+    mut event_reader: EventReader<ExplosionEvent>,
+    mut event_writer: EventWriter<Explosion2Event>,
+) {
+    for event in event_reader.iter() {
+        let bomb_entity = event.0;
+
+        if let Some((_, bomb, bomb_transform)) = bomb_collision_query.iter().find(|(other_bomb_entity, _, _)| other_bomb_entity == &bomb_entity) {
+            // bomb
+            for (other_bomb_entity, _other_bomb, other_bomb_transform) in &bomb_collision_query {
+                if bomb_entity == other_bomb_entity {
+                    continue;
+                }
+
+                // horizontal
+                if collide(bomb_transform.translation, Vec2::new(BRICK_SIZE.x * (2. * (bomb.power as f32) + 1.), BRICK_SIZE.y), other_bomb_transform.translation, other_bomb_transform.scale.truncate()).is_some() {
+                    event_writer.send(Explosion2Event(other_bomb_entity));
+                }
+                // vertical
+                else if collide(bomb_transform.translation, Vec2::new(BRICK_SIZE.x, BRICK_SIZE.y * (2. * (bomb.power as f32) + 1.)), other_bomb_transform.translation, other_bomb_transform.scale.truncate()).is_some() {
+                    event_writer.send(Explosion2Event(other_bomb_entity));
+                }
+            }
+
+            // brick
+            for (brick_entity, brick_transform) in &brick_collision_query {
+                // horizontal
+                if collide(bomb_transform.translation, Vec2::new(BRICK_SIZE.x * (2. * (bomb.power as f32) + 1.), BRICK_SIZE.y), brick_transform.translation, brick_transform.scale.truncate()).is_some() {
+                    scoreboard.score += 1;
+                    commands.entity(brick_entity).despawn();
+                }
+                // vertical
+                else if collide(bomb_transform.translation, Vec2::new(BRICK_SIZE.x, BRICK_SIZE.y * (2. * (bomb.power as f32) + 1.)), brick_transform.translation, brick_transform.scale.truncate()).is_some() {
+                    scoreboard.score += 1;
+                    commands.entity(brick_entity).despawn();
+                }
+            }
+
+            // player
+            for (player_entity, player_transform, mut player) in &mut player_collision_query {
+                if player_entity == bomb.player {
+                    player.active_bombs -= 1;
+                }
+
+                // horizontal
+                if collide(bomb_transform.translation, Vec2::new(BRICK_SIZE.x * (2. * (bomb.power as f32) + 1.), BRICK_SIZE.y), player_transform.translation, player_transform.scale.truncate()).is_some() {
+                    scoreboard.score += 100;
+                    commands.entity(player_entity).despawn();
+                }
+                // vertical
+                else if collide(bomb_transform.translation, Vec2::new(BRICK_SIZE.x, BRICK_SIZE.y * (2. * (bomb.power as f32) + 1.)), player_transform.translation, player_transform.scale.truncate()).is_some() {
+                    scoreboard.score += 1;
+                    commands.entity(player_entity).despawn();
+                }
+            }
+
+            // horizontal fire
+            commands
+                .spawn()
+                .insert(Fire(Timer::from_seconds(1., false)))
+                .insert_bundle(SpriteBundle {
+                    sprite: Sprite {
+                        color: FIRE_COLOR,
+                        ..default()
+                    },
+                    transform: Transform {
+                        translation: bomb_transform.translation,
+                        scale: Vec3::new(BRICK_SIZE.x * (2. * (bomb.power as f32) + 1.), BRICK_SIZE.y, 1.0),
+                        ..default()
+                    },
+                    ..default()
+                });
+            // vertical fire
+            commands
+                .spawn()
+                .insert(Fire(Timer::from_seconds(1., false)))
+                .insert_bundle(SpriteBundle {
+                    sprite: Sprite {
+                        color: FIRE_COLOR,
+                        ..default()
+                    },
+                    transform: Transform {
+                        translation: bomb_transform.translation,
+                        scale: Vec3::new(BRICK_SIZE.x, BRICK_SIZE.y * (2. * (bomb.power as f32) + 1.), 1.0),
+                        ..default()
+                    },
+                    ..default()
+                });
+        }
+
+        commands.entity(bomb_entity).despawn();
+    }
+}
+
+fn fire(
+    mut commands: Commands,
+    mut fire_query: Query<(Entity, &mut  Fire), With<Fire>>,
+    time: Res<Time>,
+) {
+    for (fire_entity, mut fire) in &mut fire_query {
+        fire.0.tick(time.delta());
+        if fire.0.finished() {
+            commands.entity(fire_entity).despawn();
+        }
+    }
+}
+
+fn explode2(
+    mut event_reader: EventReader<Explosion2Event>,
+    mut event_writer: EventWriter<ExplosionEvent>,
+) {
+    for event in event_reader.iter() {
+        event_writer.send(ExplosionEvent(event.0));
+    }
+}
+
+fn update_scoreboard(scoreboard: Res<Scoreboard>, mut query: Query<&mut Text>) {
+    let mut text = query.single_mut();
+    text.sections[1].value = scoreboard.score.to_string();
+}
