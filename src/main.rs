@@ -3,7 +3,11 @@
 use bevy::{
     prelude::*,
     sprite::collide_aabb::{collide, Collision},
+    time::FixedTimestep,
 };
+
+// Defines the amount of time that should elapse between each physics step.
+const TIME_STEP: f32 = 1.0 / 60.0;
 
 const WALL_THICKNESS: f32 = 10.0;
 // x coordinates
@@ -45,14 +49,17 @@ fn main() {
         .add_startup_system(setup)
         .add_event::<ExplosionEvent>()
         .add_event::<Explosion2Event>()
+        .add_event::<MoveEvent>()
         .add_system_set(
             SystemSet::new()
+                .with_run_criteria(FixedTimestep::step(TIME_STEP as f64))
                 .with_system(check_for_explosions)
                 .with_system(move_player.before(check_for_explosions))
+                .with_system(move_event.after(move_player))
                 .with_system(place_bomb.before(check_for_explosions))
                 .with_system(explode.after(check_for_explosions))
                 .with_system(explode2.after(explode))
-                .with_system(fire.after(explode))
+                .with_system(fire.after(explode)),
         )
         .add_system(update_scoreboard)
         .add_system(bevy::window::close_on_esc)
@@ -85,6 +92,8 @@ struct Breakable;
 struct ExplosionEvent(Entity);
 
 struct Explosion2Event(Entity);
+
+struct MoveEvent(Collision);
 
 #[derive(Component)]
 struct Brick;
@@ -187,7 +196,11 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
         .insert_bundle(SpriteBundle {
             transform: Transform {
                 // TODO: define starting point
-                translation: Vec3::new(LEFT_WALL + BRICK_SIZE.x / 2., TOP_WALL - BRICK_SIZE.y / 2., 0.0),
+                translation: Vec3::new(
+                    LEFT_WALL + BRICK_SIZE.x / 2.,
+                    TOP_WALL - BRICK_SIZE.y / 2.,
+                    0.0,
+                ),
                 scale: PLAYER_SIZE.extend(0.0),
                 ..default()
             },
@@ -246,21 +259,18 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
             // TODO: manage different dispositions
             if row % 2 == 1 && col % 2 == 1 {
                 // brick
-                commands
-                    .spawn()
-                    .insert(Brick)
-                    .insert_bundle(SpriteBundle {
-                        sprite: Sprite {
-                            color: WALL_COLOR,
-                            ..default()
-                        },
-                        transform: Transform {
-                            translation: brick_position.extend(0.0),
-                            scale: Vec3::new(BRICK_SIZE.x, BRICK_SIZE.y, 1.0),
-                            ..default()
-                        },
+                commands.spawn().insert(Brick).insert_bundle(SpriteBundle {
+                    sprite: Sprite {
+                        color: WALL_COLOR,
                         ..default()
-                    });
+                    },
+                    transform: Transform {
+                        translation: brick_position.extend(0.0),
+                        scale: Vec3::new(BRICK_SIZE.x, BRICK_SIZE.y, 1.0),
+                        ..default()
+                    },
+                    ..default()
+                });
             }
             // TODO: randomly dispose walls
             else if (2..(ROWS - 2)).contains(&row) || (2..(COLS - 2)).contains(&col) {
@@ -286,50 +296,80 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
     }
 }
 
-fn move_player(
-    keyboard_input: Res<Input<KeyCode>>,
+fn move_player(keyboard_input: Res<Input<KeyCode>>, mut event_writer: EventWriter<MoveEvent>) {
+    for key in keyboard_input.get_pressed() {
+        match key {
+            KeyCode::Up => {
+                event_writer.send(MoveEvent(Collision::Top));
+            }
+            KeyCode::Down => {
+                event_writer.send(MoveEvent(Collision::Bottom));
+            }
+            KeyCode::Right => {
+                event_writer.send(MoveEvent(Collision::Right));
+            }
+            KeyCode::Left => {
+                event_writer.send(MoveEvent(Collision::Left));
+            }
+            _ => {}
+        }
+    }
+}
+
+fn move_event(
+    mut event_reader: EventReader<MoveEvent>,
     collision_query: Query<&Transform, (With<Brick>, Without<Player>)>,
     mut query: Query<&mut Transform, With<Player>>,
 ) {
     if let Ok(mut player_transform) = query.get_single_mut() {
-        let mut new_translation = player_transform.translation.clone();
-        for key in keyboard_input.get_pressed() {
-            match key {
-                KeyCode::Up => {
-                    new_translation.y = (TOP_WALL - BRICK_SIZE.y / 2.).min(player_transform.translation.y + MOVE_SPEED_Y);
-                },
-                KeyCode::Down => {
-                    new_translation.y = (BOTTOM_WALL + BRICK_SIZE.y / 2.).max(player_transform.translation.y - MOVE_SPEED_Y);
-                },
-                KeyCode::Right => {
-                    new_translation.x = (RIGHT_WALL - BRICK_SIZE.x / 2.).min(player_transform.translation.x + MOVE_SPEED_X);
-                },
-                KeyCode::Left => {
-                    new_translation.x = (LEFT_WALL + BRICK_SIZE.x / 2.).max(player_transform.translation.x - MOVE_SPEED_X);
-                },
-                _ => {},
+        for MoveEvent(direction) in event_reader.iter() {
+            let mut new_translation = player_transform.translation.clone();
+            match direction {
+                Collision::Top => {
+                    new_translation.y = (TOP_WALL - BRICK_SIZE.y / 2.)
+                        .min(player_transform.translation.y + MOVE_SPEED_Y);
+                }
+                Collision::Bottom => {
+                    new_translation.y = (BOTTOM_WALL + BRICK_SIZE.y / 2.)
+                        .max(player_transform.translation.y - MOVE_SPEED_Y);
+                }
+                Collision::Right => {
+                    new_translation.x = (RIGHT_WALL - BRICK_SIZE.x / 2.)
+                        .min(player_transform.translation.x + MOVE_SPEED_X);
+                }
+                Collision::Left => {
+                    new_translation.x = (LEFT_WALL + BRICK_SIZE.x / 2.)
+                        .max(player_transform.translation.x - MOVE_SPEED_X);
+                }
+                _ => {}
             }
-        }
 
-        let player_size = player_transform.scale.truncate();
-        let (mut collide_up, mut collide_down, mut collide_right, mut collide_left) = (false, false, false, false);
-        for brick_transform in &collision_query {
-            if let Some(collision) = collide(new_translation, player_size, brick_transform.translation, brick_transform.scale.truncate()) {
-                match collision {
-                    Collision::Top => collide_down = true,
-                    Collision::Bottom => collide_up = true,
-                    Collision::Left => collide_right = true,
-                    Collision::Right => collide_left = true,
-                    _ => {},
+            let player_size = player_transform.scale.truncate();
+            let (mut collide_up, mut collide_down, mut collide_right, mut collide_left) =
+                (false, false, false, false);
+            for brick_transform in &collision_query {
+                if let Some(collision) = collide(
+                    new_translation,
+                    player_size,
+                    brick_transform.translation,
+                    brick_transform.scale.truncate(),
+                ) {
+                    match collision {
+                        Collision::Top => collide_down = true,
+                        Collision::Bottom => collide_up = true,
+                        Collision::Left => collide_right = true,
+                        Collision::Right => collide_left = true,
+                        _ => {}
+                    }
                 }
             }
-        }
 
-        if !collide_up && !collide_down {
-            player_transform.translation.y = new_translation.y;
-        }
-        if !collide_left && !collide_right {
-            player_transform.translation.x = new_translation.x;
+            if !collide_up && !collide_down {
+                player_transform.translation.y = new_translation.y;
+            }
+            if !collide_left && !collide_right {
+                player_transform.translation.x = new_translation.x;
+            }
         }
     }
 }
@@ -392,16 +432,28 @@ fn explode(
     mut commands: Commands,
     asset_server: Res<AssetServer>,
     mut scoreboard: ResMut<Scoreboard>,
-    bomb_collision_query: Query<(Entity, &Bomb, &Transform), (Without<Brick>, Without<Player>, With<Bomb>)>,
-    brick_collision_query: Query<(Entity, &Transform), (With<Brick>, With<Breakable>, Without<Player>, Without<Bomb>)>,
-    mut player_collision_query: Query<(Entity, &Transform, &mut Player), (Without<Brick>, With<Player>, Without<Bomb>)>,
+    bomb_collision_query: Query<
+        (Entity, &Bomb, &Transform),
+        (Without<Brick>, Without<Player>, With<Bomb>),
+    >,
+    brick_collision_query: Query<
+        (Entity, &Transform),
+        (With<Brick>, With<Breakable>, Without<Player>, Without<Bomb>),
+    >,
+    mut player_collision_query: Query<
+        (Entity, &Transform, &mut Player),
+        (Without<Brick>, With<Player>, Without<Bomb>),
+    >,
     mut event_reader: EventReader<ExplosionEvent>,
     mut event_writer: EventWriter<Explosion2Event>,
 ) {
     for event in event_reader.iter() {
         let bomb_entity = event.0;
 
-        if let Some((_, bomb, bomb_transform)) = bomb_collision_query.iter().find(|(other_bomb_entity, _, _)| other_bomb_entity == &bomb_entity) {
+        if let Some((_, bomb, bomb_transform)) = bomb_collision_query
+            .iter()
+            .find(|(other_bomb_entity, _, _)| other_bomb_entity == &bomb_entity)
+        {
             // bomb
             for (other_bomb_entity, _other_bomb, other_bomb_transform) in &bomb_collision_query {
                 if bomb_entity == other_bomb_entity {
@@ -411,7 +463,8 @@ fn explode(
                 // horizontal
                 if collide(bomb_transform.translation, Vec2::new(BRICK_SIZE.x * (2. * (bomb.power as f32) + 1.), BRICK_SIZE.y), other_bomb_transform.translation, other_bomb_transform.scale.truncate()).is_some()
                 // vertical
-                || collide(bomb_transform.translation, Vec2::new(BRICK_SIZE.x, BRICK_SIZE.y * (2. * (bomb.power as f32) + 1.)), other_bomb_transform.translation, other_bomb_transform.scale.truncate()).is_some() {
+                || collide(bomb_transform.translation, Vec2::new(BRICK_SIZE.x, BRICK_SIZE.y * (2. * (bomb.power as f32) + 1.)), other_bomb_transform.translation, other_bomb_transform.scale.truncate()).is_some()
+                {
                     event_writer.send(Explosion2Event(other_bomb_entity));
                 }
             }
@@ -421,7 +474,8 @@ fn explode(
                 // horizontal
                 if collide(bomb_transform.translation, Vec2::new(BRICK_SIZE.x * (2. * (bomb.power as f32) + 1.), BRICK_SIZE.y), brick_transform.translation, brick_transform.scale.truncate()).is_some()
                 // vertical
-                || collide(bomb_transform.translation, Vec2::new(BRICK_SIZE.x, BRICK_SIZE.y * (2. * (bomb.power as f32) + 1.)), brick_transform.translation, brick_transform.scale.truncate()).is_some() {
+                || collide(bomb_transform.translation, Vec2::new(BRICK_SIZE.x, BRICK_SIZE.y * (2. * (bomb.power as f32) + 1.)), brick_transform.translation, brick_transform.scale.truncate()).is_some()
+                {
                     scoreboard.score += 1;
                     commands.entity(brick_entity).despawn();
                 }
@@ -436,11 +490,11 @@ fn explode(
                 // horizontal
                 if collide(bomb_transform.translation, Vec2::new(BRICK_SIZE.x * (2. * (bomb.power as f32) + 1.), BRICK_SIZE.y), player_transform.translation, player_transform.scale.truncate()).is_some()
                 // vertical
-                || collide(bomb_transform.translation, Vec2::new(BRICK_SIZE.x, BRICK_SIZE.y * (2. * (bomb.power as f32) + 1.)), player_transform.translation, player_transform.scale.truncate()).is_some() {
+                || collide(bomb_transform.translation, Vec2::new(BRICK_SIZE.x, BRICK_SIZE.y * (2. * (bomb.power as f32) + 1.)), player_transform.translation, player_transform.scale.truncate()).is_some()
+                {
                     if player_entity == bomb.player {
                         game_over(&mut commands, &asset_server);
-                    }
-                    else {
+                    } else {
                         scoreboard.score += 100;
                     }
                     commands.entity(player_entity).despawn();
@@ -458,7 +512,11 @@ fn explode(
                     },
                     transform: Transform {
                         translation: bomb_transform.translation,
-                        scale: Vec3::new(BRICK_SIZE.x * (2. * (bomb.power as f32) + 1.), BRICK_SIZE.y, 1.0),
+                        scale: Vec3::new(
+                            BRICK_SIZE.x * (2. * (bomb.power as f32) + 1.),
+                            BRICK_SIZE.y,
+                            1.0,
+                        ),
                         ..default()
                     },
                     ..default()
@@ -474,7 +532,11 @@ fn explode(
                     },
                     transform: Transform {
                         translation: bomb_transform.translation,
-                        scale: Vec3::new(BRICK_SIZE.x, BRICK_SIZE.y * (2. * (bomb.power as f32) + 1.), 1.0),
+                        scale: Vec3::new(
+                            BRICK_SIZE.x,
+                            BRICK_SIZE.y * (2. * (bomb.power as f32) + 1.),
+                            1.0,
+                        ),
                         ..default()
                     },
                     ..default()
@@ -487,7 +549,7 @@ fn explode(
 
 fn fire(
     mut commands: Commands,
-    mut fire_query: Query<(Entity, &mut  Fire), With<Fire>>,
+    mut fire_query: Query<(Entity, &mut Fire), With<Fire>>,
     time: Res<Time>,
 ) {
     for (fire_entity, mut fire) in &mut fire_query {
@@ -514,7 +576,8 @@ fn update_scoreboard(scoreboard: Res<Scoreboard>, mut query: Query<&mut Text>) {
 }
 
 fn game_over(commands: &mut Commands, asset_server: &AssetServer) {
-    commands.spawn()
+    commands
+        .spawn()
         .insert_bundle(NodeBundle {
             style: Style {
                 size: Size::new(Val::Percent(100.0), Val::Percent(100.0)),
@@ -534,7 +597,7 @@ fn game_over(commands: &mut Commands, asset_server: &AssetServer) {
                         font: asset_server.load("fonts/FiraSans-Bold.ttf"),
                         font_size: GAMEOVER_FONT_SIZE,
                         color: TEXT_COLOR,
-                    }
+                    },
                 }],
                 alignment: TextAlignment {
                     vertical: VerticalAlign::Center,
